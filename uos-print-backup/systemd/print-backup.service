@@ -1,0 +1,15 @@
+[Unit]
+Description=UOS Print Job Backup Service
+After=cups.service
+Wants=cups.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m printbackup.daemon
+Environment=PYTHONPATH=/opt/print-backup
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
