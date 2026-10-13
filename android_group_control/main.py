@@ -2,11 +2,12 @@
 
 运行: python main.py
 """
+import csv
 import threading
 import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import ImageTk
 
@@ -39,6 +40,7 @@ class GroupControlApp:
         self.landscape = False
         self.press = None          # (x, y, time)
         self.running = True
+        self.csv_rows = []         # 导入的 CSV 行（dict）
 
         self._build_ui()
         self.refresh_devices()
@@ -76,6 +78,19 @@ class GroupControlApp:
         self.text_entry.pack(fill=tk.X, pady=2)
         self.text_entry.bind("<Return>", lambda e: self.send_text())
         ttk.Button(left, text="发送文字", command=self.send_text).pack(anchor="w")
+
+        ttk.Separator(left).pack(fill=tk.X, pady=8)
+        ttk.Label(left, text="按设备输入不同内容（CSV 文件）").pack(anchor="w")
+        ttk.Button(left, text="导入 CSV", command=self.import_csv).pack(anchor="w", pady=2)
+        self.field_var = tk.StringVar()
+        self.field_box = ttk.Combobox(left, textvariable=self.field_var,
+                                      state="readonly", width=26)
+        self.field_box.pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="输入每台设备对应的值",
+                   command=self.send_per_device).pack(anchor="w")
+        self.csv_info = tk.StringVar(value="未导入")
+        ttk.Label(left, textvariable=self.csv_info, wraplength=220,
+                  foreground="#555").pack(anchor="w")
 
         ttk.Separator(left).pack(fill=tk.X, pady=8)
         self.status = tk.StringVar(value="就绪")
@@ -201,6 +216,63 @@ class GroupControlApp:
         if s:
             self.dispatch("text", s)
             self.text_entry.delete(0, tk.END)
+
+    # ---------- 按设备输入不同内容 ----------
+    def import_csv(self):
+        path = filedialog.askopenfilename(
+            title="选择 CSV 文件", filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:  # 兼容 Excel 导出的 BOM
+                rows = [{k.strip(): (v or "").strip() for k, v in r.items() if k}
+                        for r in csv.DictReader(f)]
+        except UnicodeDecodeError:
+            with open(path, newline="", encoding="gbk") as f:        # 中文版 Excel 默认编码
+                rows = [{k.strip(): (v or "").strip() for k, v in r.items() if k}
+                        for r in csv.DictReader(f)]
+        if not rows:
+            messagebox.showwarning("提示", "文件里没有数据")
+            return
+        self.csv_rows = rows
+        fields = [k for k in rows[0] if k not in ("serial", "设备")]
+        self.field_box["values"] = fields
+        if fields:
+            self.field_var.set(fields[0])
+        self._show_mapping()
+
+    def _row_mapping(self):
+        """返回 {serial: row}。有 serial/设备 列就按序列号对应，否则按设备列表顺序对应。"""
+        if not self.csv_rows:
+            return {}
+        key = next((k for k in ("serial", "设备") if k in self.csv_rows[0]), None)
+        if key:
+            return {r[key]: r for r in self.csv_rows if r.get(key) in self.devices}
+        return dict(zip(self.devices, self.csv_rows))
+
+    def _show_mapping(self):
+        mapping = self._row_mapping()
+        field = self.field_var.get()
+        lines = [f"{self.devices[s].model}: {r.get(field, '')}" for s, r in mapping.items()]
+        missing = len(self.devices) - len(mapping)
+        if missing:
+            lines.append(f"（{missing} 台设备没有对应的行，会跳过）")
+        self.csv_info.set(f"已导入 {len(self.csv_rows)} 行\n" + "\n".join(lines))
+
+    def send_per_device(self):
+        field = self.field_var.get()
+        if not self.csv_rows or not field:
+            messagebox.showinfo("提示", "请先导入 CSV 并选择要输入的列")
+            return
+        mapping = self._row_mapping()
+        sent = 0
+        for dev in self.targets():
+            value = mapping.get(dev.serial, {}).get(field)
+            if value:
+                self.pool.submit(dev.text, value)
+                sent += 1
+        self._show_mapping()
+        self.status.set(f"已按设备输入「{field}」→ {sent} 台设备")
 
     def targets(self):
         master = self.master_var.get()
